@@ -797,6 +797,11 @@ protected:
                      */
                     bool            readAndClearHasChanged();
 
+                    /** Force updating track metadata to audio HAL stream next time
+                     * readAndClearHasChanged() is called.
+                     */
+                    void            setHasChanged() { mHasChanged = true; }
+
                 private:
                     void            logTrack(const char *funcName, const sp<T> &track) const;
 
@@ -924,6 +929,7 @@ protected:
 
     // ThreadBase virtuals
     virtual     void        preExit();
+    virtual     void        onIdleMixer();
 
     virtual     bool        keepWakeLock() const { return true; }
     virtual     void        acquireWakeLock_l() {
@@ -1032,7 +1038,7 @@ public:
                     return mMixerChannelMask;
                 }
 
-                status_t    getTimestamp_l(AudioTimestamp& timestamp);
+    virtual     status_t    getTimestamp_l(AudioTimestamp& timestamp);
 
                 void        addPatchTrack(const sp<PatchTrack>& track);
                 void        deletePatchTrack(const sp<PatchTrack>& track);
@@ -1394,6 +1400,7 @@ protected:
                 bool        mHwSupportsPause;
                 bool        mHwPaused;
                 bool        mFlushPending;
+                bool        mHwSupportsSuspend;
                 // volumes last sent to audio HAL with stream->setVolume()
                 float mLeftVolFloat;
                 float mRightVolFloat;
@@ -1477,6 +1484,7 @@ protected:
     virtual     void        threadLoop_standby();
     virtual     void        threadLoop_mix();
     virtual     void        threadLoop_sleepTime();
+    virtual     void        onIdleMixer();
     virtual     uint32_t    correctLatency_l(uint32_t latency) const;
 
     virtual     status_t    createAudioPatch_l(const struct audio_patch *patch,
@@ -1500,6 +1508,7 @@ private:
                 // accessible only within the threadLoop(), no locks required
                 //          mFastMixer->sq()    // for mutating and pushing state
                 int32_t     mFastMixerFutex;    // for cold idle
+                int64_t     mIdleTimeOffsetUs;
 
                 std::atomic_bool mMasterMono;
 public:
@@ -1589,6 +1598,10 @@ protected:
     float                   mMasterBalanceLeft = 1.f;
     float                   mMasterBalanceRight = 1.f;
 
+    uint64_t                mFramesWrittenAtStandby;// used to reset frames on track reset
+    uint64_t                mFramesWrittenForSleep; // used to reset frames on track removal
+                                                    // or underrun before entering standby
+
 public:
     virtual     bool        hasFastMixer() const { return false; }
 
@@ -1610,6 +1623,7 @@ public:
                     }
                     return INVALID_OPERATION;
                 }
+    virtual     status_t    getTimestamp_l(AudioTimestamp& timestamp) override;
 };
 
 class OffloadThread : public DirectOutputThread {
@@ -2088,7 +2102,7 @@ class MmapThread : public ThreadBase
     virtual     void        threadLoop_exit();
     virtual     void        threadLoop_standby();
     virtual     bool        shouldStandby_l() { return false; }
-    virtual     status_t    exitStandby();
+    virtual     status_t    exitStandby_l() REQUIRES(mLock);
 
     virtual     status_t    initCheck() const { return (mHalStream == 0) ? NO_INIT : NO_ERROR; }
     virtual     size_t      frameCount() const { return mFrameCount; }
@@ -2239,7 +2253,7 @@ public:
 
                 AudioStreamIn* clearInput();
 
-                status_t       exitStandby() override;
+                status_t       exitStandby_l() REQUIRES(mLock) override;
 
                 void           updateMetadata_l() override;
                 void           processVolume_l() override;

@@ -397,6 +397,10 @@ cc_library {
         "framework-permission-aidl-cpp",
     ],
 
+    whole_static_libs: [
+        "libavmediaextentions",
+    ],
+
     export_include_dirs: [
         "include",
     ],

@@ -529,10 +529,7 @@ AudioFlinger::PlaybackThread::OpPlayAudioMonitor::createIfNeeded(
             id, attr.flags);
         return nullptr;
     }
-
-    AttributionSourceState checkedAttributionSource = AudioFlinger::checkAttributionSourcePackage(
-            attributionSource);
-    return new OpPlayAudioMonitor(checkedAttributionSource, attr.usage, id);
+    return new OpPlayAudioMonitor(attributionSource, attr.usage, id);
 }
 
 AudioFlinger::PlaybackThread::OpPlayAudioMonitor::OpPlayAudioMonitor(
@@ -1496,9 +1493,6 @@ void AudioFlinger::PlaybackThread::Track::setTeePatches(TeePatches teePatches) {
 
 status_t AudioFlinger::PlaybackThread::Track::getTimestamp(AudioTimestamp& timestamp)
 {
-    if (!isOffloaded() && !isDirect()) {
-        return INVALID_OPERATION; // normal tracks handled through SSQ
-    }
     sp<ThreadBase> thread = mThread.promote();
     if (thread == 0) {
         return INVALID_OPERATION;

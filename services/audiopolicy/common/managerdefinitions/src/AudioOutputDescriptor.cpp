@@ -296,7 +296,7 @@ void AudioOutputDescriptor::log(const char* indent)
 SwAudioOutputDescriptor::SwAudioOutputDescriptor(const sp<IOProfile>& profile,
                                                  AudioPolicyClientInterface *clientInterface)
     : AudioOutputDescriptor(profile, clientInterface),
-    mProfile(profile), mIoHandle(AUDIO_IO_HANDLE_NONE), mLatency(0),
+    mProfile(profile), mLatency(0),
     mOutput1(0), mOutput2(0), mDirectOpenCount(0),
     mDirectClientSession(AUDIO_SESSION_NONE)
 {
@@ -856,6 +856,23 @@ audio_io_handle_t SwAudioOutputCollection::getA2dpOutput() const
         }
     }
     return 0;
+}
+
+bool SwAudioOutputCollection::isA2dpOnPrimary() const
+{
+    sp<SwAudioOutputDescriptor> primaryOutput = getPrimaryOutput();
+
+    if ((primaryOutput != NULL) && (primaryOutput->mProfile != NULL)
+        && (primaryOutput->mProfile->getModule() != NULL)) {
+        Vector <sp<IOProfile>> primaryOutputProfiles =
+            primaryOutput->mProfile->getModule()->mOutputProfiles;
+        for (size_t j = 0; j < primaryOutputProfiles.size(); j++) {
+            if (primaryOutputProfiles[j]->supportsDeviceTypes(getAudioDeviceOutAllA2dpSet())) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 bool SwAudioOutputCollection::isA2dpOffloadedOnPrimary() const

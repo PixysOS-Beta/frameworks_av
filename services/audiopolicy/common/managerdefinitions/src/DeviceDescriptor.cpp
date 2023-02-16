@@ -251,6 +251,7 @@ ssize_t DeviceVector::add(const sp<DeviceDescriptor>& item)
         ALOGW("DeviceVector::add device %08x already in", item->type());
         ret = -1;
     }
+
     return ret;
 }
 

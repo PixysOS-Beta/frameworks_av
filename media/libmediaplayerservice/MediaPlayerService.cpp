@@ -21,6 +21,7 @@
 #define LOG_TAG "MediaPlayerService"
 #include <utils/Log.h>
 
+#include <inttypes.h>
 #include <chrono>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -1031,8 +1032,7 @@ status_t MediaPlayerService::Client::setDataSource(
 
 status_t MediaPlayerService::Client::setDataSource(int fd, int64_t offset, int64_t length)
 {
-    ALOGV("setDataSource fd=%d (%s), offset=%lld, length=%lld",
-            fd, nameForFd(fd).c_str(), (long long) offset, (long long) length);
+    ALOGV("setDataSource fd=%d, offset=%" PRId64 ", length=%" PRId64 "", fd, offset, length);
     struct stat sb;
     int ret = fstat(fd, &sb);
     if (ret != 0) {
@@ -1040,11 +1040,11 @@ status_t MediaPlayerService::Client::setDataSource(int fd, int64_t offset, int64
         return UNKNOWN_ERROR;
     }
 
-    ALOGV("st_dev  = %llu", static_cast<unsigned long long>(sb.st_dev));
+    ALOGV("st_dev  = %" PRIu64 "", static_cast<uint64_t>(sb.st_dev));
     ALOGV("st_mode = %u", sb.st_mode);
     ALOGV("st_uid  = %lu", static_cast<unsigned long>(sb.st_uid));
     ALOGV("st_gid  = %lu", static_cast<unsigned long>(sb.st_gid));
-    ALOGV("st_size = %llu", static_cast<unsigned long long>(sb.st_size));
+    ALOGV("st_size = %" PRId64 "", sb.st_size);
 
     if (offset >= sb.st_size) {
         ALOGE("offset error");
@@ -1052,7 +1052,7 @@ status_t MediaPlayerService::Client::setDataSource(int fd, int64_t offset, int64
     }
     if (offset + length > sb.st_size) {
         length = sb.st_size - offset;
-        ALOGV("calculated length = %lld", (long long)length);
+        ALOGV("calculated length = %" PRId64 "\n", length);
     }
 
     player_type playerType = MediaPlayerFactory::getPlayerType(this,
@@ -1955,7 +1955,11 @@ int64_t MediaPlayerService::AudioOutput::getPlayedOutDurationUs(int64_t nowUs) c
         //        numFramesPlayed, (long long)numFramesPlayedAtUs);
     } else {                         // case 3: transitory at new track or audio fast tracks.
         res = mTrack->getPosition(&numFramesPlayed);
-        CHECK_EQ(res, (status_t)OK);
+        if (res != OK) {
+            // return with invalid duration to indicate playback position should
+            // be queried from MediaClock using system clock
+            return -1;
+        }
         numFramesPlayedAtUs = nowUs;
         numFramesPlayedAtUs += 1000LL * mTrack->latency() / 2; /* XXX */
         //ALOGD("getPosition: %u %lld", numFramesPlayed, (long long)numFramesPlayedAtUs);
@@ -2488,6 +2492,9 @@ void MediaPlayerService::AudioOutput::close()
     ALOGV("close");
     sp<AudioTrack> track;
     {
+        if (mTrack != 0) {
+            mTrack->stopAndJoinCallbacks();
+        }
         Mutex::Autolock lock(mLock);
         track = mTrack;
         close_l(); // clears mTrack
@@ -2683,7 +2690,7 @@ size_t MediaPlayerService::AudioOutput::CallbackData::onMoreData(const AudioTrac
     // This is a benign busy-wait, with the next data request generated 10 ms or more later;
     // nevertheless for power reasons, we don't want to see too many of these.
 
-    ALOGV_IF(actualSize == 0 && buffer->size > 0, "callbackwrapper: empty buffer returned");
+    ALOGV_IF(actualSize == 0 && buffer.size() > 0, "callbackwrapper: empty buffer returned");
     unlock();
     return actualSize;
 }

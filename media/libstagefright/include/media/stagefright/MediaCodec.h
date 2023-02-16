@@ -84,11 +84,13 @@ struct MediaCodec : public AHandler {
     };
 
     enum BufferFlags {
-        BUFFER_FLAG_SYNCFRAME     = 1,
-        BUFFER_FLAG_CODECCONFIG   = 2,
-        BUFFER_FLAG_EOS           = 4,
+        BUFFER_FLAG_SYNCFRAME   = 1,
+        BUFFER_FLAG_CODECCONFIG = 2,
+        BUFFER_FLAG_EOS         = 4,
         BUFFER_FLAG_PARTIAL_FRAME = 8,
         BUFFER_FLAG_MUXER_DATA    = 16,
+        BUFFER_FLAG_EXTRADATA = 0x1000,
+        BUFFER_FLAG_DATACORRUPT = 0x2000,
     };
 
     enum CVODegree {
@@ -356,6 +358,7 @@ private:
         kWhatSetNotification                = 'setN',
         kWhatDrmReleaseCrypto               = 'rDrm',
         kWhatCheckBatteryStats              = 'chkB',
+        kWhatGetMetrics                     = 'getM',
     };
 
     enum {
@@ -426,6 +429,7 @@ private:
     sp<Surface> mSurface;
     SoftwareRenderer *mSoftRenderer;
 
+    Mutex mMetricsLock;
     mediametrics_handle_t mMetricsHandle = 0;
     nsecs_t mLifetimeStartNs = 0;
     void initMediametrics();
@@ -433,6 +437,7 @@ private:
     void flushMediametrics();
     void updateEphemeralMediametrics(mediametrics_handle_t item);
     void updateLowLatency(const sp<AMessage> &msg);
+    void onGetMetrics(const sp<AMessage>& msg);
     constexpr const char *asString(TunnelPeekState state, const char *default_string="?");
     void updateTunnelPeek(const sp<AMessage> &msg);
     void updatePlaybackDuration(const sp<AMessage> &msg);
@@ -471,7 +476,8 @@ private:
     // the (possibly) updated format is returned in place.
     status_t shapeMediaFormat(
             const sp<AMessage> &format,
-            uint32_t flags);
+            uint32_t flags,
+            mediametrics_handle_t handle);
 
     // populate the format shaper library with information for this codec encoding
     // for the indicated media type
@@ -527,7 +533,7 @@ private:
     void PostReplyWithError(const sp<AMessage> &msg, int32_t err);
     void PostReplyWithError(const sp<AReplyToken> &replyID, int32_t err);
 
-    status_t init(const AString &name);
+    status_t init(const AString &name, bool nameIsType = false);
 
     void setState(State newState);
     void returnBuffersToCodec(bool isReclaim = false);

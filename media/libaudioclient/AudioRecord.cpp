@@ -36,6 +36,7 @@
 #include <media/IAudioFlinger.h>
 #include <media/MediaMetricsItem.h>
 #include <media/TypeConverter.h>
+#include <media/SeempLog.h>
 
 #define WAIT_PERIOD_MS          10
 
@@ -456,7 +457,12 @@ status_t AudioRecord::set(
     }
 
     // TODO: add audio hardware input latency here
-    mLatency = (1000LL * mFrameCount) / mSampleRate;
+    if (mTransfer == TRANSFER_CALLBACK ||
+            mTransfer == TRANSFER_SYNC) {
+        mLatency = (1000 * mNotificationFramesAct) / mSampleRate;
+    } else {
+        mLatency = (1000 * mFrameCount) / mSampleRate;
+    }
     mMarkerPosition = 0;
     mMarkerReached = false;
     mNewPosition = 0;
@@ -516,6 +522,7 @@ status_t AudioRecord::start(AudioSystem::sync_event_t event, audio_session_t tri
 {
     const int64_t beginNs = systemTime();
     ALOGV("%s(%d): sync event %d trigger session %d", __func__, mPortId, event, triggerSession);
+    SEEMPLOG_RECORD(71,"");
     AutoMutex lock(mLock);
 
     status_t status = NO_ERROR;
@@ -970,9 +977,14 @@ status_t AudioRecord::createRecord_l(const Modulo<uint32_t> &epoch)
     mSessionId = output.sessionId;
     mSampleRate = output.sampleRate;
     mServerConfig = output.serverConfig;
-    mServerFrameSize = audio_bytes_per_frame(
-            audio_channel_count_from_in_mask(mServerConfig.channel_mask), mServerConfig.format);
-    mServerSampleSize = audio_bytes_per_sample(mServerConfig.format);
+    if (audio_is_linear_pcm(mServerConfig.format)) {
+        mServerFrameSize = audio_bytes_per_frame(
+            audio_channel_count_from_in_mask(mServerConfig.channel_mask),
+            mServerConfig.format);
+        mServerSampleSize = audio_bytes_per_sample(mServerConfig.format);
+    } else {
+        mServerFrameSize = mServerSampleSize = sizeof(uint8_t);
+    }
 
     if (output.cblk == 0) {
         errorMessage = StringPrintf("%s(%d): Could not get control block", __func__, mPortId);
@@ -1271,6 +1283,20 @@ audio_io_handle_t AudioRecord::getInputPrivate() const
 {
     AutoMutex lock(mLock);
     return mInput;
+}
+
+status_t AudioRecord::setParameters(const String8& keyValuePairs) {
+    AutoMutex lock(mLock);
+    return mInput != AUDIO_IO_HANDLE_NONE
+               ? AudioSystem::setParameters(mInput, keyValuePairs)
+               : NO_INIT;
+}
+
+String8 AudioRecord::getParameters(const String8& keys) {
+    AutoMutex lock(mLock);
+    return mInput != AUDIO_IO_HANDLE_NONE
+               ? AudioSystem::getParameters(mInput, keys)
+               : String8::empty();
 }
 
 // -------------------------------------------------------------------------

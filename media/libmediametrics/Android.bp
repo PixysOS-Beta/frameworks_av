@@ -50,7 +50,7 @@ cc_library {
     stubs: {
         symbol_file: "libmediametrics.map.txt",
         versions: [
-            "1" ,
+           "1" ,
         ]
     },
 

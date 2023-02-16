@@ -14,6 +14,40 @@
  * limitations under the License.
  */
 
+/* Changes from Qualcomm Innovation Center are provided under the following license:
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *   * Redistributions of source code must retain the above copyright
+ *     notice, this list of conditions and the following disclaimer.
+ *
+ *   * Redistributions in binary form must reproduce the above
+ *     copyright notice, this list of conditions and the following
+ *     disclaimer in the documentation and/or other materials provided
+ *     with the distribution.
+ *
+ *   * Neither the name of Qualcomm Innovation Center, Inc. nor the names of its
+ *     contributors may be used to endorse or promote products derived
+ *     from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
 #define LOG_TAG "Camera3-Device"
 #define ATRACE_TAG ATRACE_TAG_CAMERA
 //#define LOG_NDEBUG 0
@@ -422,6 +456,29 @@ ssize_t Camera3Device::getJpegBufferSize(const CameraMetadata &info, uint32_t wi
     }
     maxJpegBufferSize = jpegBufMaxSize.data.i32[0];
 
+    uint32_t tag = 0;
+    ssize_t jpegDebugSize = 0;
+    sp<VendorTagDescriptor> vTags;
+    sp<VendorTagDescriptorCache> cache = VendorTagDescriptorCache::getGlobalVendorTagCache();
+    if (NULL != cache.get()) {
+        metadata_vendor_id_t vendorId;
+        status_t res = info.getVendorId(&vendorId);
+        if (res == OK) {
+            cache->getVendorTagDescriptor(vendorId, &vTags);
+        }
+    }
+
+    if (NULL != vTags.get()) {
+        status_t res = CameraMetadata::getTagFromName("org.quic.camera.jpegdebugdata.size", vTags.get(), &tag);
+
+        if (res == OK) {
+            camera_metadata_ro_entry jpegdebugdatasize = info.find(tag);
+            if (jpegdebugdatasize.count != 0) {
+                jpegDebugSize = jpegdebugdatasize.data.i32[0];
+                ALOGE("%s: Camera %s: Jpeg debug data size %zd", __FUNCTION__, mId.string(), jpegDebugSize);
+            }
+        }
+    }
     camera3::Size chosenMaxJpegResolution = maxDefaultJpegResolution;
     if (useMaxSensorPixelModeThreshold) {
         maxJpegBufferSize =
@@ -431,16 +488,12 @@ ssize_t Camera3Device::getJpegBufferSize(const CameraMetadata &info, uint32_t wi
     }
     assert(kMinJpegBufferSize < maxJpegBufferSize);
 
+    ssize_t minJpegBufferSize = kMinJpegBufferSize + jpegDebugSize;
     // Calculate final jpeg buffer size for the given resolution.
     float scaleFactor = ((float) (width * height)) /
             (chosenMaxJpegResolution.width * chosenMaxJpegResolution.height);
-    ssize_t jpegBufferSize = scaleFactor * (maxJpegBufferSize - kMinJpegBufferSize) +
-            kMinJpegBufferSize;
-    if (jpegBufferSize > maxJpegBufferSize) {
-        ALOGI("%s: jpeg buffer size calculated is > maxJpeg bufferSize(%zd), clamping",
-                  __FUNCTION__, maxJpegBufferSize);
-        jpegBufferSize = maxJpegBufferSize;
-    }
+    ssize_t jpegBufferSize = scaleFactor * (maxJpegBufferSize - minJpegBufferSize) +
+            minJpegBufferSize;
     return jpegBufferSize;
 }
 
@@ -1489,6 +1542,15 @@ status_t Camera3Device::waitUntilDrainedLocked(nsecs_t maxExpectedDuration) {
         mStatusTracker->dumpActiveComponents();
         SET_ERR_L("Error waiting for HAL to drain: %s (%d)", strerror(-res),
                 res);
+        if (res == TIMED_OUT) {
+            for (size_t i = 0; i < mInFlightMap.size(); i++) {
+                InFlightRequest r = mInFlightMap.valueAt(i);
+                ALOGE("%s: Timed out Frame %d Timestamp: %" PRId64 ",  metadata"
+                    " arrived: %s, buffers left: %d\n", __FUNCTION__, mInFlightMap.keyAt(i),
+                        r.shutterTimestamp, r.haveResultMetadata ? "true" : "false",
+                        r.numBuffersLeft);
+            }
+        }
     }
     return res;
 }
@@ -3127,9 +3189,15 @@ status_t Camera3Device::RequestThread::clear(
 
 status_t Camera3Device::RequestThread::flush() {
     ATRACE_CALL();
+    status_t flush_status;
     Mutex::Autolock l(mFlushLock);
 
-    return mInterface->flush();
+    flush_status = mInterface->flush();
+    // We have completed flush, signal RequestThread::waitForNextRequestLocked() to no longer wait for
+    // new requests
+    mRequestSignal.signal();
+
+    return flush_status;
 }
 
 void Camera3Device::RequestThread::setPaused(bool paused) {

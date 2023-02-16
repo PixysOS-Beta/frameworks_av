@@ -34,6 +34,7 @@
 #include <media/AudioContainers.h>
 #include <utils/String8.h>
 #include <utils/Log.h>
+#include <cutils/properties.h>
 
 namespace android
 {
@@ -275,6 +276,10 @@ DeviceVector Engine::getDevicesForStrategyInt(legacy_strategy strategy,
     case STRATEGY_PHONE: {
         devices = availableOutputDevices.getDevicesFromType(AUDIO_DEVICE_OUT_HEARING_AID);
         if (!devices.isEmpty()) break;
+        if (getDpConnAndAllowedForVoice() && isInCall()) {
+            devices = availableOutputDevices.getDevicesFromType(AUDIO_DEVICE_OUT_AUX_DIGITAL);
+            if (!devices.isEmpty()) break;
+        }
         devices = availableOutputDevices.getFirstDevicesFromTypes(
                         getLastRemovableMediaDevices(GROUP_NONE, {AUDIO_DEVICE_OUT_BLE_HEADSET}));
         if (!devices.isEmpty()) break;
@@ -327,6 +332,16 @@ DeviceVector Engine::getDevicesForStrategyInt(legacy_strategy strategy,
                 }
             }
         }
+        // if display-port is connected and being used in voice usecase,
+        // play ringtone over speaker and display-port
+        if ((strategy == STRATEGY_SONIFICATION) && getDpConnAndAllowedForVoice()) {
+             DeviceVector devices2 = availableOutputDevices.getDevicesFromType(
+                 AUDIO_DEVICE_OUT_AUX_DIGITAL);
+             if (!devices2.isEmpty()) {
+               devices.add(devices2);
+               break;
+             }
+        }
         // The second device used for sonification is the same as the device used by media strategy
         FALLTHROUGH_INTENDED;
 
@@ -335,6 +350,13 @@ DeviceVector Engine::getDevicesForStrategyInt(legacy_strategy strategy,
     case STRATEGY_SONIFICATION_RESPECTFUL:
     case STRATEGY_REROUTING:
     case STRATEGY_MEDIA: {
+        if (isInCall() && devices.isEmpty()) {
+          // when in call, get the device for Phone strategy
+          devices = getDevicesForStrategyInt(
+                    STRATEGY_PHONE, availableOutputDevices, outputs);
+          break;
+        }
+
         DeviceVector devices2;
         if (strategy != STRATEGY_SONIFICATION) {
             // no sonification on remote submix (e.g. WFD)
@@ -385,7 +407,13 @@ DeviceVector Engine::getDevicesForStrategyInt(legacy_strategy strategy,
                         getLastRemovableMediaDevices(GROUP_WIRED));
             }
         }
-        if ((devices2.isEmpty()) && (strategy != STRATEGY_SONIFICATION)) {
+        if (devices2.isEmpty()) {
+            devices2 = availableOutputDevices.getDevicesFromType(AUDIO_DEVICE_OUT_USB_DEVICE);
+        }
+        if (devices2.isEmpty()) {
+            devices2 = availableOutputDevices.getDevicesFromType(AUDIO_DEVICE_OUT_DGTL_DOCK_HEADSET);
+        }
+        if ((devices2.isEmpty()) && (strategy != STRATEGY_SONIFICATION) && (devices.isEmpty())) {
             // no sonification on aux digital (e.g. HDMI)
             devices2 = availableOutputDevices.getDevicesFromType(AUDIO_DEVICE_OUT_AUX_DIGITAL);
         }
@@ -393,6 +421,10 @@ DeviceVector Engine::getDevicesForStrategyInt(legacy_strategy strategy,
                 (getForceUse(AUDIO_POLICY_FORCE_FOR_DOCK) == AUDIO_POLICY_FORCE_ANALOG_DOCK)) {
             devices2 = availableOutputDevices.getDevicesFromType(
                     AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET);
+        }
+        if ((devices2.isEmpty()) && (strategy != STRATEGY_SONIFICATION) && (devices.isEmpty())) {
+            // no sonification on WFD sink
+            devices2 = availableOutputDevices.getDevicesFromType(AUDIO_DEVICE_OUT_PROXY);
         }
         if (devices2.isEmpty()) {
             devices2 = availableOutputDevices.getFirstDevicesFromTypes({
@@ -506,6 +538,11 @@ sp<DeviceDescriptor> Engine::getDeviceForInputSource(audio_source_t inputSource)
     switch (inputSource) {
     case AUDIO_SOURCE_DEFAULT:
     case AUDIO_SOURCE_MIC:
+        if (property_get_bool("vendor.audio.enable.mirrorlink", false)) {
+            device = availableDevices.getDevice(
+                    AUDIO_DEVICE_IN_REMOTE_SUBMIX, String8(""), AUDIO_FORMAT_DEFAULT);
+            if (device != nullptr) break;
+        }
         device = availableDevices.getDevice(
                 AUDIO_DEVICE_IN_BLUETOOTH_A2DP, String8(""), AUDIO_FORMAT_DEFAULT);
         if (device != nullptr) break;
@@ -560,6 +597,11 @@ sp<DeviceDescriptor> Engine::getDeviceForInputSource(audio_source_t inputSource)
 
     case AUDIO_SOURCE_VOICE_RECOGNITION:
     case AUDIO_SOURCE_UNPROCESSED:
+        if (property_get_bool("vendor.audio.enable.mirrorlink", false)) {
+            device = availableDevices.getDevice(
+                    AUDIO_DEVICE_IN_REMOTE_SUBMIX, String8(""), AUDIO_FORMAT_DEFAULT);
+            if (device != nullptr) break;
+        }
         if (audio_is_bluetooth_out_sco_device(commDeviceType)) {
             device = availableDevices.getDevice(
                     AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET, String8(""), AUDIO_FORMAT_DEFAULT);
@@ -579,11 +621,17 @@ sp<DeviceDescriptor> Engine::getDeviceForInputSource(audio_source_t inputSource)
         // to devices attached to the same HW module as the build in mic
         LOG_ALWAYS_FATAL_IF(availablePrimaryDevices.isEmpty(), "Primary devices not found");
         availableDevices = availablePrimaryDevices;
+        if (property_get_bool("vendor.audio.enable.mirrorlink", false)) {
+            device = availableDevices.getDevice(
+                    AUDIO_DEVICE_IN_REMOTE_SUBMIX, String8(""), AUDIO_FORMAT_DEFAULT);
+            if (device != nullptr) break;
+        }
         if (audio_is_bluetooth_out_sco_device(commDeviceType)) {
             device = availableDevices.getDevice(
                     AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET, String8(""), AUDIO_FORMAT_DEFAULT);
             if (device != nullptr) break;
         }
+
         device = availableDevices.getFirstExistingDevice({
                 AUDIO_DEVICE_IN_WIRED_HEADSET,
                 AUDIO_DEVICE_IN_USB_HEADSET, AUDIO_DEVICE_IN_USB_DEVICE,

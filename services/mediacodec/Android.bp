@@ -86,6 +86,7 @@ cc_binary {
         "libavservices_minijail",
         "libcutils",
         "libhidlbase",
+        "libstagefright_omx_ext",
         "libstagefright_omx",
         "libstagefright_xmlparser",
         "android.hardware.media.omx@1.0",
@@ -131,6 +132,15 @@ cc_binary {
         "-Wall",
         "-Wno-error=deprecated-declarations",
     ],
+
+    arch: {
+        arm: {
+            // TODO(b/151100811): reenable ENABLE_BINDER_BUFFER_TUNING_FOR_32_BIT flag
+            //cflags: [
+            //    "-DENABLE_BINDER_BUFFER_TUNING_FOR_32_BIT",
+            //],
+        },
+    },
 }
 
 

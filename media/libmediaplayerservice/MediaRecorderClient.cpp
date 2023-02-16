@@ -21,7 +21,9 @@
 #include "MediaRecorderClient.h"
 #include "MediaPlayerService.h"
 #include "StagefrightRecorder.h"
+#include "mediaplayerservice/AVMediaServiceExtensions.h"
 
+#include <inttypes.h>
 #include <android/hardware/media/omx/1.0/IOmx.h>
 #include <android/hardware/media/c2/1.0/IComponentStore.h>
 #include <binder/IPCThreadState.h>
@@ -388,7 +390,7 @@ MediaRecorderClient::MediaRecorderClient(const sp<MediaPlayerService>& service,
     ALOGV("Client constructor");
     // attribution source already validated in createMediaRecorder
     mAttributionSource = attributionSource;
-    mRecorder = new StagefrightRecorder(attributionSource);
+    mRecorder = AVMediaServiceFactory::get()->createStagefrightRecorder(attributionSource);
     mMediaPlayerService = service;
 }
 
