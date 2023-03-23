@@ -39,6 +39,8 @@
 #include <media/stagefright/MediaCodec.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaErrors.h>
+#include <stagefright/AVExtensions.h>
+#include "mediaplayerservice/AVNuExtensions.h"
 #include <media/stagefright/SurfaceUtils.h>
 #include <mpeg2ts/ATSParser.h>
 #include <gui/Surface.h>
@@ -89,7 +91,8 @@ NuPlayer::Decoder::Decoder(
       mNumVideoTemporalLayerAllowed(1),
       mCurrentMaxVideoTemporalLayerId(0),
       mResumePending(false),
-      mComponentName("decoder") {
+      mComponentName("decoder"),
+      mVideoRenderFps(0.0f) {
     mCodecLooper = new ALooper;
     mCodecLooper->setName("NPDecoder-CL");
     mCodecLooper->start(false, false, ANDROID_PRIORITY_AUDIO);
@@ -300,8 +303,11 @@ void NuPlayer::Decoder::onConfigure(const sp<AMessage> &format) {
     mComponentName.append(" decoder");
     ALOGV("[%s] onConfigure (surface=%p)", mComponentName.c_str(), mSurface.get());
 
+    mCodec = AVUtils::get()->createCustomComponentByName(mCodecLooper, mime.c_str(), false /* encoder */, format);
+    if (mCodec == NULL) {
     mCodec = MediaCodec::CreateByType(
             mCodecLooper, mime.c_str(), false /* encoder */, NULL /* err */, mPid, mUid, format);
+    }
     int32_t secure = 0;
     if (format->findInt32("secure", &secure) && secure != 0) {
         if (mCodec != NULL) {
@@ -345,6 +351,8 @@ void NuPlayer::Decoder::onConfigure(const sp<AMessage> &format) {
     mIsEncryptedObservedEarlier = mIsEncryptedObservedEarlier || mIsEncrypted;
     ALOGV("onConfigure mCrypto: %p (%d)  mIsSecure: %d",
             crypto.get(), (crypto != NULL ? crypto->getStrongCount() : 0), mIsSecure);
+    // set flag to drop frame with corrupt flag
+    format->setInt32("vendor.qti-ext-dec-drop-corrupt.value", 1);
 
     err = mCodec->configure(
             format, mSurface, crypto, 0 /* flags */);
@@ -358,9 +366,21 @@ void NuPlayer::Decoder::onConfigure(const sp<AMessage> &format) {
     }
     rememberCodecSpecificData(format);
 
-    // the following should work in configured state
-    CHECK_EQ((status_t)OK, mCodec->getOutputFormat(&mOutputFormat));
-    CHECK_EQ((status_t)OK, mCodec->getInputFormat(&mInputFormat));
+    // Do not assume mCodec is in configured state. There are some race conditions which will
+    // move mCodec to error state after configure() has returned success.
+    // As a temporary fix, handle the error case cleanly, without assert check.
+    err = mCodec->getOutputFormat(&mOutputFormat);
+    if (err == OK) {
+        err = mCodec->getInputFormat(&mInputFormat);
+    }
+    if (err != OK) {
+        ALOGE("Failed to get input/output format from [%s] decoder (err=%d)",
+                mComponentName.c_str(), err);
+        mCodec->release();
+        mCodec.clear();
+        handleError(err);
+        return;
+    }
 
     {
         Mutex::Autolock autolock(mStatsLock);
@@ -435,6 +455,7 @@ void NuPlayer::Decoder::onSetParameters(const sp<AMessage> &params) {
 
     if (needAdjustLayers) {
         float decodeFrameRate = mFrameRateTotal;
+        float operating_rate;
         // enable temporal layering optimization only if we know the layering depth
         if (mNumVideoTemporalLayerTotal > 1) {
             int32_t layerId;
@@ -456,7 +477,10 @@ void NuPlayer::Decoder::onSetParameters(const sp<AMessage> &params) {
         }
 
         sp<AMessage> codecParams = new AMessage();
-        codecParams->setFloat("operating-rate", decodeFrameRate * mPlaybackSpeed);
+        operating_rate = decodeFrameRate * mPlaybackSpeed;
+        if ((int)operating_rate > 100)
+            mRequestInputBufferDelay = (1000.f/operating_rate) * 1000LL;
+        codecParams->setFloat("operating-rate", operating_rate);
         mCodec->setParameters(codecParams);
     }
 }
@@ -755,6 +779,11 @@ bool NuPlayer::Decoder::handleAnOutputBuffer(
         buffer->meta()->setInt64("frameIndex", frameIndex);
     }
 
+    if (mVideoRenderFps > 0.0f) {
+        buffer->meta()->setFloat("renderFps", mVideoRenderFps);
+        mVideoRenderFps = 0.0f; //Reset the value after setting to renderer once
+    }
+
     bool eos = flags & MediaCodec::BUFFER_FLAG_EOS;
     // we do not expect CODECCONFIG or SYNCFRAME for decoder
 
@@ -788,6 +817,12 @@ bool NuPlayer::Decoder::handleAnOutputBuffer(
         }
 
         mSkipRenderingUntilMediaTimeUs = -1;
+    } else if ((flags & MediaCodec::BUFFER_FLAG_DATACORRUPT) &&
+            AVNuUtils::get()->dropCorruptFrame()) {
+        ALOGV("[%s] dropping corrupt buffer at time %lld as requested.",
+                     mComponentName.c_str(), (long long)timeUs);
+        reply->post();
+        return true;
     }
 
     // wait until 1st frame comes out to signal resume complete
@@ -817,6 +852,14 @@ void NuPlayer::Decoder::handleOutputFormatChange(const sp<AMessage> &format) {
         notify->setInt32("what", kWhatVideoSizeChanged);
         notify->setMessage("format", format);
         notify->post();
+
+        // Use the render rate from decoder, if decoder has set it.
+        float renderRate = 0.0f;
+        if (format->findFloat("vendor.qti-ext-dec-output-render-frame-rate.value",
+                 &renderRate) && renderRate > 0.0f) {
+            mVideoRenderFps = renderRate;
+            ALOGI("Got video render rate from decoder as %f", mVideoRenderFps);
+        }
     } else if (mRenderer != NULL) {
         uint32_t flags;
         int64_t durationUs;
@@ -905,6 +948,7 @@ status_t NuPlayer::Decoder::fetchInputData(sp<AMessage> &reply) {
                     // treat seamless format change separately
                     formatChange = !seamlessFormatChange;
                 }
+                AVNuUtils::get()->checkFormatChange(&formatChange, accessUnit);
 
                 // For format or time change, return EOS to queue EOS input,
                 // then wait for EOS on output.
@@ -1049,6 +1093,14 @@ bool NuPlayer::Decoder::onInputBufferFetched(const sp<AMessage> &msg) {
                         mComponentName.c_str(), (long long)resumeAtMediaTimeUs);
                 mSkipRenderingUntilMediaTimeUs = resumeAtMediaTimeUs;
             }
+        }
+
+        sp<ABuffer> hdr10PlusInfo;
+        if (buffer->meta()->findBuffer("hdr10-plus-info", &hdr10PlusInfo) &&
+                hdr10PlusInfo != NULL) {
+           sp<AMessage> hdr10PlusMsg = new AMessage;
+           hdr10PlusMsg->setBuffer("hdr10-plus-info", hdr10PlusInfo);
+           mCodec->setParameters(hdr10PlusMsg);
         }
 
         int64_t timeUs = 0;

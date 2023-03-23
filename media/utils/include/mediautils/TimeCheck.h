@@ -55,6 +55,7 @@ class TimeCheck {
     //
     static constexpr TimeCheck::Duration kDefaultSecondChanceDuration =
             std::chrono::milliseconds(2000);
+    static uint32_t sTimeOutMs;
 
     /**
      * TimeCheck is a RAII object which will notify a callback
@@ -97,6 +98,7 @@ class TimeCheck {
     static std::string toString();
     static void setAudioHalPids(const std::vector<pid_t>& pids);
     static std::vector<pid_t> getAudioHalPids();
+    static void setSystemReadyTimeoutMs(uint32_t timeoutMs);
 
   private:
     // Helper class for handling events.

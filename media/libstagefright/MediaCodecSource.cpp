@@ -39,6 +39,8 @@
 #include <media/stagefright/MediaErrors.h>
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/Utils.h>
+#include <stagefright/AVExtensions.h>
+#include <OMX_Core.h>
 
 namespace android {
 
@@ -346,6 +348,7 @@ sp<MediaCodecSource> MediaCodecSource::Create(
         uint32_t flags) {
     sp<MediaCodecSource> mediaSource = new MediaCodecSource(
             looper, format, source, persistentSurface, flags);
+    AVUtils::get()->getHFRParams(&mediaSource->mIsHFR, &mediaSource->mBatchSize, format);
 
     if (mediaSource->init() == OK) {
         return mediaSource;
@@ -472,7 +475,10 @@ MediaCodecSource::MediaCodecSource(
       mFirstSampleSystemTimeUs(-1LL),
       mPausePending(false),
       mFirstSampleTimeUs(-1LL),
-      mGeneration(0) {
+      mGeneration(0),
+      mPrevBufferTimestampUs(0),
+      mIsHFR(false),
+      mBatchSize(0){
     CHECK(mLooper != NULL);
 
     if (!(mFlags & FLAG_USE_SURFACE_INPUT)) {
@@ -529,11 +535,13 @@ status_t MediaCodecSource::initEncoder() {
                     MediaCodec::CONFIGURE_FLAG_ENCODE);
     } else {
         Vector<AString> matchingCodecs;
-        MediaCodecList::findMatchingCodecs(
-                outputMIME.c_str(), true /* encoder */,
-                ((mFlags & FLAG_PREFER_SOFTWARE_CODEC) ? MediaCodecList::kPreferSoftwareCodecs : 0),
-                &matchingCodecs);
-
+        bool useQcHwEnc = AVUtils::get()->useQCHWEncoder(mOutputFormat, &matchingCodecs);
+        if (!useQcHwEnc) {
+            MediaCodecList::findMatchingCodecs(
+                    outputMIME.c_str(), true /* encoder */,
+                    ((mFlags & FLAG_PREFER_SOFTWARE_CODEC) ? MediaCodecList::kPreferSoftwareCodecs : 0),
+                    &matchingCodecs);
+        }
         for (size_t ix = 0; ix < matchingCodecs.size(); ++ix) {
             mEncoder = MediaCodec::CreateByComponentName(
                     mCodecLooper, matchingCodecs[ix]);
@@ -547,11 +555,16 @@ status_t MediaCodecSource::initEncoder() {
             mEncoderActivityNotify = new AMessage(kWhatEncoderActivity, mReflector);
             mEncoder->setCallback(mEncoderActivityNotify);
 
+            AString codecName = matchingCodecs[ix];
+            bool isHWEnc = codecName.startsWith("c2.qti");
+
             err = mEncoder->configure(
                         mOutputFormat,
                         NULL /* nativeWindow */,
                         NULL /* crypto */,
-                        MediaCodec::CONFIGURE_FLAG_ENCODE);
+                        MediaCodec::CONFIGURE_FLAG_ENCODE |
+                        ((mIsVideo && isHWEnc && (mFlags & FLAG_USE_SURFACE_INPUT)) ?
+                         MediaCodec::CONFIGURE_FLAG_USE_BLOCK_MODEL : 0));
 
             if (err == OK) {
                 break;
@@ -584,6 +597,10 @@ status_t MediaCodecSource::initEncoder() {
 
         if (err != OK) {
             return err;
+        }
+        if (mEncoder == NULL) {
+            ALOGE("initEncoder : mEncoder is null");
+            return BAD_VALUE;
         }
     }
 
@@ -660,6 +677,9 @@ void MediaCodecSource::signalEOS(status_t err) {
             output->mBufferQueue.clear();
             output->mEncoderReachedEOS = true;
             output->mErrorCode = err;
+            if (err != ERROR_END_OF_STREAM) {
+                output->mErrorCode = ERROR_IO;
+            }
             if (!(mFlags & FLAG_USE_SURFACE_INPUT)) {
                 mStopping = true;
                 mPuller->stop();
@@ -727,12 +747,16 @@ status_t MediaCodecSource::feedEncoderInputBuffers() {
                     return OK;
                 }
             }
-
+            mInputBufferTimeOffsetUs = AVUtils::get()->overwriteTimeOffset(mIsHFR,
+                mInputBufferTimeOffsetUs, &mPrevBufferTimestampUs, timeUs, mBatchSize);
             timeUs += mInputBufferTimeOffsetUs;
 
             // push decoding time for video, or drift time for audio
             if (mIsVideo) {
                 mDecodingTimeQueue.push_back(timeUs);
+                if (!(mFlags & FLAG_USE_SURFACE_INPUT)) {
+                    AVUtils::get()->addDecodingTimesFromBatch(mbuf, mDecodingTimeQueue, mInputBufferTimeOffsetUs);
+                }
             } else {
 #if DEBUG_DRIFT_TIME
                 if (mFirstSampleTimeUs < 0ll) {
@@ -753,7 +777,7 @@ status_t MediaCodecSource::feedEncoderInputBuffers() {
             if (err != OK || inbuf == NULL || inbuf->data() == NULL
                     || mbuf->data() == NULL || mbuf->size() == 0) {
                 mbuf->release();
-                signalEOS();
+                signalEOS(err);
                 break;
             }
 
@@ -944,7 +968,7 @@ void MediaCodecSource::onMessageReceived(const sp<AMessage> &msg) {
             sp<MediaCodecBuffer> outbuf;
             status_t err = mEncoder->getOutputBuffer(index, &outbuf);
             if (err != OK || outbuf == NULL || outbuf->data() == NULL) {
-                signalEOS();
+                signalEOS(err);
                 break;
             } else if (outbuf->size() == 0) {
                 // Zero length CSD buffers are not treated as an error
@@ -956,7 +980,10 @@ void MediaCodecSource::onMessageReceived(const sp<AMessage> &msg) {
                 break;
             }
 
-            MediaBufferBase *mbuf = new MediaBuffer(outbuf->size());
+            MediaBuffer *mbuf = new MediaBuffer(outbuf->size());
+            sp<MetaData> meta = new MetaData(mbuf->meta_data());
+            AVUtils::get()->setDeferRelease(meta);
+
             mbuf->setObserver(this);
             mbuf->add_ref();
 
@@ -1028,7 +1055,7 @@ void MediaCodecSource::onMessageReceived(const sp<AMessage> &msg) {
                 mStopping = true;
                 mPuller->stop();
             }
-            signalEOS();
+            signalEOS(err);
        }
        break;
     }
@@ -1111,6 +1138,9 @@ void MediaCodecSource::onMessageReceived(const sp<AMessage> &msg) {
         if (generation != mGeneration) {
              break;
         }
+
+        releaseEncoder();
+
         ALOGD("source (%s) stopping stalled", mIsVideo ? "video" : "audio");
         signalEOS();
         break;
@@ -1188,4 +1218,11 @@ void MediaCodecSource::onMessageReceived(const sp<AMessage> &msg) {
     }
 }
 
+void MediaCodecSource::notifyPerformanceMode() {
+    if (mIsVideo && mEncoder != NULL) {
+        sp<AMessage> params = new AMessage;
+        params->setInt32("qti.request.perf", true);
+        mEncoder->setParameters(params);
+    }
+}
 } // namespace android

@@ -84,11 +84,13 @@ struct MediaCodec : public AHandler {
     };
 
     enum BufferFlags {
-        BUFFER_FLAG_SYNCFRAME     = 1,
-        BUFFER_FLAG_CODECCONFIG   = 2,
-        BUFFER_FLAG_EOS           = 4,
+        BUFFER_FLAG_SYNCFRAME   = 1,
+        BUFFER_FLAG_CODECCONFIG = 2,
+        BUFFER_FLAG_EOS         = 4,
         BUFFER_FLAG_PARTIAL_FRAME = 8,
         BUFFER_FLAG_MUXER_DATA    = 16,
+        BUFFER_FLAG_EXTRADATA = 0x1000,
+        BUFFER_FLAG_DATACORRUPT = 0x2000,
     };
 
     enum CVODegree {
@@ -456,19 +458,12 @@ private:
     int32_t mRotationDegrees;
     int32_t mAllowFrameDroppingBySurface;
 
-    enum {
-        kFlagHasHdrStaticInfo   = 1,
-        kFlagHasHdr10PlusInfo   = 2,
-    };
-    uint32_t mHdrInfoFlags;
-    void updateHdrMetrics(bool isConfig);
-    hdr_format getHdrFormat(const AString &mime, const int32_t profile,
-            const int32_t colorTransfer);
-    hdr_format getHdrFormatForEncoder(const AString &mime, const int32_t profile,
-            const int32_t colorTransfer);
-    hdr_format getHdrFormatForDecoder(const AString &mime, const int32_t profile,
-            const int32_t colorTransfer);
-    bool profileSupport10Bits(const AString &mime, const int32_t profile);
+    int32_t mConfigColorTransfer;
+    bool mHDRStaticInfo;
+    bool mHDR10PlusInfo;
+    void updateHDRFormatMetric();
+    hdr_format getHDRFormat(const int32_t profile, const int32_t transfer,
+            const AString &mediaType);
 
     // initial create parameters
     AString mInitName;
@@ -538,7 +533,7 @@ private:
     void PostReplyWithError(const sp<AMessage> &msg, int32_t err);
     void PostReplyWithError(const sp<AReplyToken> &replyID, int32_t err);
 
-    status_t init(const AString &name);
+    status_t init(const AString &name, bool nameIsType = false);
 
     void setState(State newState);
     void returnBuffersToCodec(bool isReclaim = false);

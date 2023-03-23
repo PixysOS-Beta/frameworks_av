@@ -66,13 +66,16 @@ struct NuPlayer::Renderer : public AHandler {
     void signalDisableOffloadAudio();
     void signalEnableOffloadAudio();
 
-    void pause();
+    void pause(bool forPreroll = false);
     void resume();
 
     void setVideoFrameRate(float fps);
+    void setIsSeekonPause();
 
     status_t getCurrentPosition(int64_t *mediaUs);
     int64_t getVideoLateByUs();
+
+    bool isVideoPrerollInprogress() const;
 
     status_t openAudioSink(
             const sp<AMessage> &format,
@@ -101,6 +104,7 @@ struct NuPlayer::Renderer : public AHandler {
         kWhatAudioTearDown            = 'adTD',
         kWhatAudioOffloadPauseTimeout = 'aOPT',
         kWhatReleaseWakeLock          = 'adRL',
+        kWhatVideoPrerollComplete     = 'vdpC',
     };
 
     enum AudioTearDownReason {
@@ -114,7 +118,6 @@ protected:
 
     virtual void onMessageReceived(const sp<AMessage> &msg);
 
-private:
     enum {
         kWhatDrainAudioQueue     = 'draA',
         kWhatDrainVideoQueue     = 'draV',
@@ -193,6 +196,7 @@ private:
     bool mPaused;
     int64_t mPauseDrainAudioAllowedUs; // time when we can drain/deliver audio in pause mode.
 
+    bool mVideoPrerollInprogress;
     bool mVideoSampleReceived;
     bool mVideoRenderingStarted;
     int32_t mVideoRenderingStartGeneration;
@@ -268,14 +272,14 @@ private:
     status_t onConfigSync(const AVSyncSettings &sync, float videoFpsHint);
     status_t onGetSyncSettings(AVSyncSettings *sync /* nonnull */, float *videoFps /* nonnull */);
 
-    void onPause();
+    void onPause(bool forPreroll = false);
     void onResume();
     void onSetVideoFrameRate(float fps);
     int32_t getQueueGeneration(bool audio);
     int32_t getDrainGeneration(bool audio);
     bool getSyncQueues();
     void onAudioTearDown(AudioTearDownReason reason);
-    status_t onOpenAudioSink(
+    virtual status_t onOpenAudioSink(
             const sp<AMessage> &format,
             bool offloadOnly,
             bool hasVideo,
@@ -304,6 +308,11 @@ private:
     int64_t getDurationUsIfPlayedAtSampleRate(uint32_t numFrames);
 
     DISALLOW_EVIL_CONSTRUCTORS(Renderer);
+
+private:
+    bool mNeedVideoClearAnchor;
+    bool mIsSeekonPause;
+    float mVideoRenderFps;
 };
 
 } // namespace android

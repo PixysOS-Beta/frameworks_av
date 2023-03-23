@@ -72,13 +72,12 @@ struct C2SyncVariables {
     /**
      * Notify a buffer is queued. Return whether the upcoming dequeue operation
      * is not blocked. if it's blocked and waitId is non-null, waitId is returned
-     * to be used for waiting. Notify(wake-up) waitors only when 'notify' is
-     * true.
+     * to be used for waiting.
      *
      * \retval false    dequeue operation is blocked now.
      * \retval true     dequeue operation is possible.
      */
-    bool notifyQueuedLocked(uint32_t *waitId = nullptr, bool notify = true);
+    bool notifyQueuedLocked(uint32_t *waitId = nullptr);
 
     /**
      * Notify a buffer is dequeued.

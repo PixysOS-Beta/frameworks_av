@@ -55,6 +55,12 @@ cc_library_static {
         "libstagefright_rtsp_headers",
     ],
 
+    include_dirs: [
+        "frameworks/av/media/libavextensions",
+        "frameworks/av/media/libmediaplayerservice",
+        "frameworks/av/media/libmediaextractor",
+    ],
+
     cflags: [
         "-Werror",
         "-Wall",
@@ -77,6 +83,9 @@ cc_library_static {
         "libmediadrm",
         "libpowermanager",
         "android.hardware.drm-V1-ndk",
+        "libhidlmemory",
+        "libcrypto",
+        "libcamera_client",
     ],
 
     static_libs: [

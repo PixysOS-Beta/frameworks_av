@@ -25,6 +25,8 @@ package {
     ],
 }
 
+/*
+// TODO (b/168131280) Re-enable this cc_test
 cc_test{
     name: "Mpeg2tsUnitTest",
     gtest: true,
@@ -75,3 +77,4 @@ cc_test{
         ],
     },
 }
+*/

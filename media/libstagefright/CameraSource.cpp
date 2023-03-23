@@ -36,6 +36,8 @@
 #include <utils/String8.h>
 #include <cutils/properties.h>
 
+#include <stagefright/AVExtensions.h>
+
 #if LOG_NDEBUG
 #define UNUSED_UNLESS_VERBOSE(x) (void)(x)
 #else
@@ -78,10 +80,6 @@ static int32_t getColorFormat(const char* colorFormat) {
 
     if (!strcmp(colorFormat, CameraParameters::PIXEL_FORMAT_ANDROID_OPAQUE)) {
         return OMX_COLOR_FormatAndroidOpaque;
-    }
-
-    if (!strcmp(colorFormat, "YVU420SemiPlanar")) {
-        return OMX_QCOM_COLOR_FormatYVU420SemiPlanar;
     }
 
     ALOGE("Uknown color format (%s), please add it to "
@@ -154,7 +152,7 @@ status_t CameraSource::isCameraAvailable(
 
     if (camera == 0) {
         mCamera = Camera::connect(cameraId, clientName, clientUid, clientPid,
-                /*targetSdkVersion*/__ANDROID_API_FUTURE__, /*overrideToPortrait*/true);
+                /*targetSdkVersion*/__ANDROID_API_FUTURE__);
         if (mCamera == 0) return -EBUSY;
         mCameraFlags &= ~FLAGS_HOT_CAMERA;
     } else {
@@ -249,8 +247,8 @@ status_t CameraSource::isCameraColorFormatSupported(
 
 static int32_t getHighSpeedFrameRate(const CameraParameters& params) {
     const char* hsr = params.get("video-hsr");
-    int32_t rate = (hsr != NULL && strncmp(hsr, "off", 3)) ? strtol(hsr, NULL, 10) : 0;
-    return std::min(rate, 240);
+    int32_t rate = (hsr != NULL && strncmp(hsr, "off", 3)) ? atoi(hsr) : 0;
+    return rate > 240 ? 240 : rate;
 }
 
 /*
@@ -493,6 +491,10 @@ status_t CameraSource::initBufferQueue(uint32_t width, uint32_t height,
     bufferCount += kConsumerBufferCount;
 
     mVideoBufferConsumer = new BufferItemConsumer(consumer, usage, bufferCount);
+    if (mVideoBufferConsumer == nullptr) {
+        return -1;
+    }
+
     mVideoBufferConsumer->setName(String8::format("StageFright-CameraSource"));
     mVideoBufferProducer = producer;
 
@@ -610,6 +612,7 @@ status_t CameraSource::initWithCameraAccess(
     mMeta->setInt32(kKeyStride,      mVideoSize.width);
     mMeta->setInt32(kKeySliceHeight, mVideoSize.height);
     mMeta->setInt32(kKeyFrameRate,   mVideoFrameRate);
+    AVUtils::get()->extractCustomCameraKeys(params, mMeta);
     return OK;
 }
 

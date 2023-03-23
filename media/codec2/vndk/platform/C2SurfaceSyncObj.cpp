@@ -64,11 +64,6 @@ std::shared_ptr<C2SurfaceSyncMemory> C2SurfaceSyncMemory::Import(
     }
 
     HandleSyncMem *o = static_cast<HandleSyncMem*>(handle);
-    if (o->size() < sizeof(C2SyncVariables)) {
-        android_errorWriteLog(0x534e4554, "240140929");
-        return nullptr;
-    }
-
     void *ptr = mmap(NULL, o->size(), PROT_READ | PROT_WRITE, MAP_SHARED, o->memFd(), 0);
 
     if (ptr == MAP_FAILED) {
@@ -182,14 +177,12 @@ bool C2SyncVariables::isDequeueableLocked(uint32_t *waitId) {
     return true;
 }
 
-bool C2SyncVariables::notifyQueuedLocked(uint32_t *waitId, bool notify) {
+bool C2SyncVariables::notifyQueuedLocked(uint32_t *waitId) {
     // Note. thundering herds may occur. Edge trigged signalling.
     // But one waiter will guarantee to dequeue. others may wait again.
     // Minimize futex syscall(trap) for the main use case(one waiter case).
     if (mMaxDequeueCount == mCurDequeueCount--) {
-        if (notify) {
-            broadcast();
-        }
+        broadcast();
         return true;
     }
 

@@ -22,10 +22,10 @@
 
 #include <stdint.h>
 #include <sys/types.h>
-#include "IAudioFlinger.h"
+
 #include <binder/IPCThreadState.h>
 #include <binder/Parcel.h>
-#include <system/thread_defs.h>
+#include "IAudioFlinger.h"
 
 namespace android {
 
@@ -840,9 +840,7 @@ status_t AudioFlingerClientAdapter::getSupportedLatencyModes(
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // AudioFlingerServerAdapter
 AudioFlingerServerAdapter::AudioFlingerServerAdapter(
-        const sp<AudioFlingerServerAdapter::Delegate>& delegate) : mDelegate(delegate) {
-    setMinSchedulerPolicy(SCHED_NORMAL, ANDROID_PRIORITY_AUDIO);
-}
+        const sp<AudioFlingerServerAdapter::Delegate>& delegate) : mDelegate(delegate) {}
 
 status_t AudioFlingerServerAdapter::onTransact(uint32_t code,
                                                const Parcel& data,

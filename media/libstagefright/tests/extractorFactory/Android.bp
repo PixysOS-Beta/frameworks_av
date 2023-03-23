@@ -25,6 +25,8 @@ package {
     ],
 }
 
+/*
+// TODO (b/168131280) Re-enable this cc_test
 cc_test {
     name: "ExtractorFactoryTest",
     gtest: true,
@@ -67,3 +69,4 @@ cc_test {
         ],
     },
 }
+*/

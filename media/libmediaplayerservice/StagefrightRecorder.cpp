@@ -24,6 +24,8 @@
 #include <android-base/logging.h>
 #include <utils/Log.h>
 
+#include <cutils/properties.h>
+#include <inttypes.h>
 #include <webm/WebmWriter.h>
 
 #include "StagefrightRecorder.h"
@@ -55,6 +57,7 @@
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/MediaCodecSource.h>
+#include <media/stagefright/MediaCodecConstants.h>
 #include <media/stagefright/OggWriter.h>
 #include <media/stagefright/PersistentSurface.h>
 #include <media/MediaProfiles.h>
@@ -64,16 +67,21 @@
 #include <sys/types.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <future>
 
 #include <system/audio.h>
 
 #include <media/stagefright/rtsp/ARTPWriter.h>
+#include <stagefright/AVExtensions.h>
+
 
 namespace android {
 
 static const float kTypicalDisplayRefreshingRate = 60.f;
 // display refresh rate drops on battery saver
-static const float kMinTypicalDisplayRefreshingRate = kTypicalDisplayRefreshingRate / 2;
+// 60 fps refreshing rate is the most common
+// upto 60 fps, it should be no layer encoding.
+static const float kMinTypicalDisplayRefreshingRate = kTypicalDisplayRefreshingRate;
 static const int kMaxNumVideoTemporalLayers = 8;
 
 // key for media statistics
@@ -107,6 +115,7 @@ static const char *kRecorderDurationMs = "android.media.mediarecorder.durationMs
 static const char *kRecorderPaused = "android.media.mediarecorder.pausedMs";
 static const char *kRecorderNumPauses = "android.media.mediarecorder.NPauses";
 
+static const int64_t kMax32BitFileSize = 0x00ffffffffLL; // 4GB
 
 // To collect the encoder usage for the battery app
 static void addBatteryData(uint32_t params) {
@@ -129,7 +138,6 @@ StagefrightRecorder::StagefrightRecorder(const AttributionSourceState& client)
       mRTPCVOExtMap(-1),
       mRTPCVODegrees(0),
       mRTPSockDscp(0),
-      mRTPSockOptEcn(0),
       mRTPSockNetwork(0),
       mLastSeqNo(0),
       mStarted(false),
@@ -139,7 +147,6 @@ StagefrightRecorder::StagefrightRecorder(const AttributionSourceState& client)
       mSelectedMicFieldDimension(MIC_FIELD_DIMENSION_NORMAL) {
 
     ALOGV("Constructor");
-
     mMetricsItem = NULL;
     mAnalyticsDirty = false;
     reset();
@@ -549,7 +556,7 @@ status_t StagefrightRecorder::setParamAudioSamplingRate(int32_t sampleRate) {
 
 status_t StagefrightRecorder::setParamAudioNumberOfChannels(int32_t channels) {
     ALOGV("setParamAudioNumberOfChannels: %d", channels);
-    if (channels <= 0 || channels >= 3) {
+    if (channels <= 0 || channels > 6) {
         ALOGE("Invalid number of audio channels: %d", channels);
         return BAD_VALUE;
     }
@@ -628,43 +635,46 @@ status_t StagefrightRecorder::setParamVideoRotation(int32_t degrees) {
 }
 
 status_t StagefrightRecorder::setParamMaxFileDurationUs(int64_t timeUs) {
-    ALOGV("setParamMaxFileDurationUs: %lld us", (long long)timeUs);
+    ALOGV("setParamMaxFileDurationUs: %" PRId64 " us", timeUs);
 
     // This is meant for backward compatibility for MediaRecorder.java
     if (timeUs <= 0) {
-        ALOGW("Max file duration is not positive: %lld us. Disabling duration limit.",
-                (long long)timeUs);
+        ALOGW("Max file duration is not positive: %" PRId64 " us. Disabling duration limit.", timeUs);
         timeUs = 0; // Disable the duration limit for zero or negative values.
     } else if (timeUs <= 100000LL) {  // XXX: 100 milli-seconds
-        ALOGE("Max file duration is too short: %lld us", (long long)timeUs);
+        ALOGE("Max file duration is too short: %" PRId64 " us", timeUs);
         return BAD_VALUE;
     }
 
     if (timeUs <= 15 * 1000000LL) {
-        ALOGW("Target duration (%lld us) too short to be respected", (long long)timeUs);
+        ALOGW("Target duration (%" PRId64 " us) too short to be respected", timeUs);
     }
     mMaxFileDurationUs = timeUs;
     return OK;
 }
 
 status_t StagefrightRecorder::setParamMaxFileSizeBytes(int64_t bytes) {
-    ALOGV("setParamMaxFileSizeBytes: %lld bytes", (long long)bytes);
+    ALOGV("setParamMaxFileSizeBytes: %" PRId64 " bytes", bytes);
 
     // This is meant for backward compatibility for MediaRecorder.java
     if (bytes <= 0) {
-        ALOGW("Max file size is not positive: %lld bytes. "
-             "Disabling file size limit.", (long long)bytes);
+        ALOGW("Max file size is not positive: %" PRId64 " bytes. "
+             "Disabling file size limit.", bytes);
         bytes = 0; // Disable the file size limit for zero or negative values.
     } else if (bytes <= 1024) {  // XXX: 1 kB
-        ALOGE("Max file size is too small: %lld bytes", (long long)bytes);
+        ALOGE("Max file size is too small: %" PRId64 " bytes", bytes);
         return BAD_VALUE;
     }
 
     if (bytes <= 100 * 1024) {
-        ALOGW("Target file size (%lld bytes) is too small to be respected", (long long)bytes);
+        ALOGW("Target file size (%" PRId64 " bytes) is too small to be respected", bytes);
     }
 
     mMaxFileSizeBytes = bytes;
+
+    // If requested size is >4GB, force 64-bit offsets
+    mUse64BitFileOffset |= (bytes >= kMax32BitFileSize);
+
     return OK;
 }
 
@@ -713,9 +723,9 @@ status_t StagefrightRecorder::setParamVideoCameraId(int32_t cameraId) {
 }
 
 status_t StagefrightRecorder::setParamTrackTimeStatus(int64_t timeDurationUs) {
-    ALOGV("setParamTrackTimeStatus: %lld", (long long)timeDurationUs);
+    ALOGV("setParamTrackTimeStatus: %" PRId64 "", timeDurationUs);
     if (timeDurationUs < 20000) {  // Infeasible if shorter than 20 ms?
-        ALOGE("Tracking time duration too short: %lld us", (long long)timeDurationUs);
+        ALOGE("Tracking time duration too short: %" PRId64 " us", timeDurationUs);
         return BAD_VALUE;
     }
     mTrackEveryTimeDurationUs = timeDurationUs;
@@ -911,13 +921,6 @@ status_t StagefrightRecorder::setSocketNetwork(int64_t networkHandle) {
     return OK;
 }
 
-status_t StagefrightRecorder::setParamRtpEcn(int32_t ecn) {
-    ALOGV("setParamRtpEcn: %d", ecn);
-
-    mRTPSockOptEcn = ecn;
-    return OK;
-}
-
 status_t StagefrightRecorder::requestIDRFrame() {
     status_t ret = BAD_VALUE;
     if (mVideoEncoderSource != NULL) {
@@ -1099,11 +1102,6 @@ status_t StagefrightRecorder::setParameter(
         if (safe_strtoi32(value.string(), &dscp)) {
             return setParamRtpDscp(dscp);
         }
-    } else if (key == "rtp-param-set-socket-ecn") {
-        int32_t targetEcn;
-        if (safe_strtoi32(value.string(), &targetEcn)) {
-            return setParamRtpEcn(targetEcn);
-        }
     } else if (key == "rtp-param-set-socket-network") {
         int64_t networkHandle;
         if (safe_strtoi64(value.string(), &networkHandle)) {
@@ -1208,8 +1206,10 @@ status_t StagefrightRecorder::prepareInternal() {
             break;
 
         default:
-            ALOGE("Unsupported output file format: %d", mOutputFormat);
-            status = UNKNOWN_ERROR;
+            if (handleCustomRecording() != OK) {
+                ALOGE("Unsupported output file format: %d", mOutputFormat);
+                status = UNKNOWN_ERROR;
+            }
             break;
     }
 
@@ -1287,9 +1287,6 @@ status_t StagefrightRecorder::start() {
             if (mRTPSockDscp > 0) {
                 meta->setInt32(kKeyRtpDscp, mRTPSockDscp);
             }
-            if (mRTPSockOptEcn > 0) {
-                meta->setInt32(kKeyRtpEcn, mRTPSockOptEcn);
-            }
 
             status = mWriter->start(meta.get());
             break;
@@ -1297,8 +1294,10 @@ status_t StagefrightRecorder::start() {
 
         default:
         {
-            ALOGE("Unsupported output file format: %d", mOutputFormat);
-            status = UNKNOWN_ERROR;
+            if (handleCustomOutputFormats() != OK) {
+                ALOGE("Unsupported output file format: %d", mOutputFormat);
+                status = UNKNOWN_ERROR;
+            }
             break;
         }
     }
@@ -1374,8 +1373,7 @@ sp<MediaCodecSource> StagefrightRecorder::createAudioSource() {
         }
     }
 
-    sp<AudioSource> audioSource =
-        new AudioSource(
+    sp<AudioSource> audioSource = AVFactory::get()->createAudioSource(
                 &attr,
                 mAttributionSource,
                 sourceSampleRate,
@@ -1404,22 +1402,27 @@ sp<MediaCodecSource> StagefrightRecorder::createAudioSource() {
         case AUDIO_ENCODER_AAC:
             format->setString("mime", MEDIA_MIMETYPE_AUDIO_AAC);
             format->setInt32("aac-profile", OMX_AUDIO_AACObjectLC);
+            format->setInt32("profile", AACObjectLC);
             break;
         case AUDIO_ENCODER_HE_AAC:
             format->setString("mime", MEDIA_MIMETYPE_AUDIO_AAC);
             format->setInt32("aac-profile", OMX_AUDIO_AACObjectHE);
+            format->setInt32("profile", AACObjectHE);
             break;
         case AUDIO_ENCODER_AAC_ELD:
             format->setString("mime", MEDIA_MIMETYPE_AUDIO_AAC);
             format->setInt32("aac-profile", OMX_AUDIO_AACObjectELD);
+            format->setInt32("profile", AACObjectELD);
             break;
         case AUDIO_ENCODER_OPUS:
             format->setString("mime", MEDIA_MIMETYPE_AUDIO_OPUS);
             break;
 
         default:
-            ALOGE("Unknown audio encoder: %d", mAudioEncoder);
-            return NULL;
+            if (handleCustomAudioSource(format) != OK) {
+                ALOGE("Unknown audio encoder: %d", mAudioEncoder);
+                return NULL;
+            }
     }
 
     // log audio mime type for media metrics
@@ -1445,14 +1448,15 @@ sp<MediaCodecSource> StagefrightRecorder::createAudioSource() {
 
     sp<MediaCodecSource> audioEncoder =
             MediaCodecSource::Create(mLooper, format, audioSource);
-    sp<AudioSystem::AudioDeviceCallback> callback = mAudioDeviceCallback.promote();
+    if (audioEncoder == NULL) {
+        ALOGE("Failed to create audio encoder");
+    } else {
+        sp<AudioSystem::AudioDeviceCallback> callback = mAudioDeviceCallback.promote();
     if (mDeviceCallbackEnabled && callback != 0) {
         audioSource->addAudioDeviceCallback(callback);
     }
     mAudioSourceNode = audioSource;
 
-    if (audioEncoder == NULL) {
-        ALOGE("Failed to create audio encoder");
     }
 
     return audioEncoder;
@@ -1514,13 +1518,23 @@ status_t StagefrightRecorder::setupRawAudioRecording() {
     }
 
     sp<MediaCodecSource> audioEncoder = createAudioSource();
-    if (audioEncoder == NULL) {
+    if (audioEncoder != NULL) {
+        CHECK(mWriter != 0);
+        mWriter->addSource(audioEncoder);
+        mAudioEncoderSource = audioEncoder;
+    } else if (audioEncoder == NULL && mAudioEncoder == AUDIO_ENCODER_LPCM) {
+        CHECK(mWriter != 0);
+        sp<MediaSource> src = setPCMRecording();
+        if (src == NULL) {
+            ALOGE("Recording source is null");
+            return UNKNOWN_ERROR;
+        }
+        mAudioSourceNode =  reinterpret_cast<AudioSource* > (src.get());
+        mWriter->addSource(src);
+    } else if (audioEncoder == NULL) {
         return UNKNOWN_ERROR;
     }
 
-    CHECK(mWriter != 0);
-    mWriter->addSource(audioEncoder);
-    mAudioEncoderSource = audioEncoder;
 
     if (mMaxFileDurationUs != 0) {
         mWriter->setMaxFileDuration(mMaxFileDurationUs);
@@ -1588,11 +1602,12 @@ status_t StagefrightRecorder::setupMPEG2TSRecording() {
             return ERROR_UNSUPPORTED;
         }
 
-        status_t err = setupAudioEncoder(writer);
+        status_t err = setupAudioEncoder();
 
         if (err != OK) {
             return err;
         }
+        writer->addSource(mAudioEncoderSource);
     }
 
     if (mVideoSource < VIDEO_SOURCE_LIST_END) {
@@ -1907,23 +1922,25 @@ status_t StagefrightRecorder::setupCameraSource(
     pid_t pid = VALUE_OR_RETURN_STATUS(aidl2legacy_int32_t_pid_t(mAttributionSource.pid));
     String16 clientName = VALUE_OR_RETURN_STATUS(
         aidl2legacy_string_view_String16(mAttributionSource.packageName.value_or("")));
-    if (mCaptureFpsEnable && mCaptureFps != mFrameRate) {
+    if (mCaptureFpsEnable && mCaptureFps != mFrameRate ) {
         if (!(mCaptureFps > 0.)) {
             ALOGE("Invalid mCaptureFps value: %lf", mCaptureFps);
             return BAD_VALUE;
         }
 
-        mCameraSourceTimeLapse = CameraSourceTimeLapse::CreateFromCamera(
+        mCameraSourceTimeLapse = AVFactory::get()->CreateCameraSourceTimeLapseFromCamera(
                 mCamera, mCameraProxy, mCameraId, clientName, uid, pid,
                 videoSize, mFrameRate, mPreviewSurface,
                 std::llround(1e6 / mCaptureFps));
         *cameraSource = mCameraSourceTimeLapse;
     } else {
-        *cameraSource = CameraSource::CreateFromCamera(
+        mCameraSource = AVFactory::get()->CreateCameraSourceFromCamera(
                 mCamera, mCameraProxy, mCameraId, clientName, uid, pid,
                 videoSize, mFrameRate,
                 mPreviewSurface);
+        *cameraSource = mCameraSource;
     }
+    AVUtils::get()->cacheCaptureBuffers(mCamera, mVideoEncoder);
     mCamera.clear();
     mCameraProxy.clear();
     if (*cameraSource == NULL) {
@@ -2033,6 +2050,7 @@ status_t StagefrightRecorder::setupVideoEncoder(
         }
     }
 
+    setupCustomVideoEncoderParams(cameraSource, format);
     if (mOutputFormat == OUTPUT_FORMAT_RTP_AVP) {
         // This indicates that a raw image provided to encoder needs to be rotated.
         format->setInt32("rotation-degrees", mRotationDegrees);
@@ -2042,6 +2060,8 @@ status_t StagefrightRecorder::setupVideoEncoder(
     format->setInt32("bitrate-mode", mVideoBitRateMode);
     format->setInt32("frame-rate", mFrameRate);
     format->setInt32("i-frame-interval", mIFramesIntervalSec);
+    // In order to customize native recordings
+    format->setInt32("vendor.qti-ext-enc-info-native_recording.value", 1);
 
     if (mVideoTimeScale > 0) {
         format->setInt32("time-scale", mVideoTimeScale);
@@ -2096,7 +2116,8 @@ status_t StagefrightRecorder::setupVideoEncoder(
         }
     }
 
-    if (tsLayers > 1) {
+    // mIFramesIntervalSec == 0 means all Intra frame, can't support P/B layers
+    if (tsLayers > 1 && mIFramesIntervalSec != 0) {
         uint32_t bLayers = std::min(2u, tsLayers - 1); // use up-to 2 B-layers
         uint32_t pLayers = tsLayers - bLayers;
         format->setString(
@@ -2110,6 +2131,15 @@ status_t StagefrightRecorder::setupVideoEncoder(
     if (mMetaDataStoredInVideoBuffers != kMetadataBufferTypeInvalid) {
         format->setInt32("android._input-metadata-buffer-type", mMetaDataStoredInVideoBuffers);
     }
+
+    if (mOutputFormat == OUTPUT_FORMAT_MPEG_4) {
+        format->setInt32("feature-nal-length-bitstream", 1);
+        format->setInt32("nal-length-in-bytes", 4);
+        format->setInt32("vendor.qti-ext-enc-nal-length-bs.num-bytes", 4);
+    }
+
+    // Will send this info to encoder component for custom optimizations
+    format->setInt32("isNativeRecorder", 1);
 
     uint32_t flags = 0;
     if (cameraSource == NULL) {
@@ -2141,7 +2171,7 @@ status_t StagefrightRecorder::setupVideoEncoder(
     return OK;
 }
 
-status_t StagefrightRecorder::setupAudioEncoder(const sp<MediaWriter>& writer) {
+status_t StagefrightRecorder::setupAudioEncoder() {
     ATRACE_CALL();
     status_t status = BAD_VALUE;
     if (OK != (status = checkAudioEncoderCapabilities())) {
@@ -2158,16 +2188,16 @@ status_t StagefrightRecorder::setupAudioEncoder(const sp<MediaWriter>& writer) {
             break;
 
         default:
-            ALOGE("Unsupported audio encoder: %d", mAudioEncoder);
-            return UNKNOWN_ERROR;
+            if (handleCustomAudioEncoder() != OK) {
+                ALOGE("Unsupported audio encoder: %d", mAudioEncoder);
+                return UNKNOWN_ERROR;
+            }
     }
 
     sp<MediaCodecSource> audioEncoder = createAudioSource();
     if (audioEncoder == NULL) {
         return UNKNOWN_ERROR;
     }
-
-    writer->addSource(audioEncoder);
     mAudioEncoderSource = audioEncoder;
     return OK;
 }
@@ -2175,8 +2205,11 @@ status_t StagefrightRecorder::setupAudioEncoder(const sp<MediaWriter>& writer) {
 status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
     mWriter.clear();
     mTotalBitRate = 0;
+    sp<MediaCodecSource> videoSource;
+    std::future<status_t> futureVal;
 
     status_t err = OK;
+    status_t errVideo = OK;
     sp<MediaWriter> writer;
     sp<MPEG4Writer> mp4writer;
     if (mOutputFormat == OUTPUT_FORMAT_WEBM) {
@@ -2194,15 +2227,8 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
             return err;
         }
 
-        sp<MediaCodecSource> encoder;
-        err = setupVideoEncoder(mediaSource, &encoder);
-        if (err != OK) {
-            return err;
-        }
-
-        writer->addSource(encoder);
-        mVideoEncoderSource = encoder;
-        mTotalBitRate += mVideoBitRate;
+        futureVal = std::async(std::launch::async, &StagefrightRecorder::setupVideoEncoder,
+                this, mediaSource, &videoSource);
     }
 
     // Audio source is added at the end if it exists.
@@ -2210,9 +2236,33 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
     // camcorder applications in the recorded files.
     // disable audio for time lapse recording
     const bool disableAudio = mCaptureFpsEnable && mCaptureFps < mFrameRate;
-    if (!disableAudio && mAudioSource != AUDIO_SOURCE_CNT) {
-        err = setupAudioEncoder(writer);
+
+    if (!disableAudio && mAudioSource != AUDIO_SOURCE_CNT &&
+        isCompressAudioRecordingSupported()) {
+        mAudioSourceNode = setCompressAudioRecording();
+        if (mAudioSourceNode == nullptr) {
+            ALOGE("%s: unable to create compress audio recording", __func__);
+        } else {
+            writer->addSource(mAudioSourceNode);
+            ALOGI("%s:  created compress audio recording", __func__);
+        }
+    }
+
+    if (!disableAudio && mAudioSource != AUDIO_SOURCE_CNT &&
+        !mEnabledCompressAudioRecording) {
+        err = setupAudioEncoder();
+    }
+    if (mVideoSource < VIDEO_SOURCE_LIST_END) {
+        errVideo = futureVal.get();
+        if (errVideo != OK) return errVideo;
+        writer->addSource(videoSource);
+        mVideoEncoderSource = videoSource;
+        mTotalBitRate += mVideoBitRate;
+    }
+    if (!disableAudio && mAudioSource != AUDIO_SOURCE_CNT &&
+        !mEnabledCompressAudioRecording) {
         if (err != OK) return err;
+        writer->addSource(mAudioEncoderSource);
         mTotalBitRate += mAudioBitRate;
     }
 
@@ -2297,6 +2347,12 @@ status_t StagefrightRecorder::pause() {
     if (mAudioEncoderSource != NULL) {
         mAudioEncoderSource->pause();
     }
+
+    /* compress recording pause*/
+    if (mAudioSourceNode != NULL && mEnabledCompressAudioRecording) {
+        mAudioSourceNode->pause();
+    }
+
     if (mVideoEncoderSource != NULL) {
         mVideoEncoderSource->pause(meta.get());
     }
@@ -2319,6 +2375,18 @@ status_t StagefrightRecorder::resume() {
 
     int64_t bufferStartTimeUs = 0;
     bool allSourcesStarted = true;
+
+    /* compress recording resume*/
+    if (mAudioSourceNode != NULL && mEnabledCompressAudioRecording) {
+        int64_t timeUs = mAudioSourceNode->getFirstSampleSystemTimeUs();
+        if (timeUs < 0) {
+            allSourcesStarted = false;
+        }
+        if (bufferStartTimeUs < timeUs) {
+            bufferStartTimeUs = timeUs;
+        }
+    }
+
     for (const auto &source : { mAudioEncoderSource, mVideoEncoderSource }) {
         if (source == nullptr) {
             continue;
@@ -2340,7 +2408,8 @@ status_t StagefrightRecorder::resume() {
         mTotalPausedDurationUs += resumeStartTimeUs - mPauseStartTimeUs - 30000;
     }
     double timeOffset = -mTotalPausedDurationUs;
-    if (mCaptureFpsEnable && (mVideoSource == VIDEO_SOURCE_CAMERA)) {
+    if (mCaptureFpsEnable && (mVideoSource == VIDEO_SOURCE_CAMERA) &&
+          (mVideoSource != VIDEO_SOURCE_SURFACE)) {
         timeOffset *= mCaptureFps / mFrameRate;
     }
     sp<MetaData> meta = new MetaData;
@@ -2353,6 +2422,10 @@ status_t StagefrightRecorder::resume() {
         source->start(meta.get());
     }
 
+     /* compress audio recording resume*/
+    if (mAudioSourceNode != NULL && mEnabledCompressAudioRecording) {
+        mAudioSourceNode->start(meta.get());
+    }
 
     // sum info on pause duration
     // (ignore the 30msec of overlap adjustment factored into mTotalPausedDurationUs)
@@ -2383,6 +2456,14 @@ status_t StagefrightRecorder::stop() {
             ALOGW("Failed to set stopTime %lld us for %s",
                     (long long)stopTimeUs, source->isVideo() ? "Video" : "Audio");
         }
+    }
+
+    if (mVideoEncoderSource != NULL) {
+        mVideoEncoderSource->notifyPerformanceMode();
+    }
+
+    if (mCameraSource != NULL) {
+        mCameraSource->notifyPerformanceMode();
     }
 
     if (mWriter != NULL) {
@@ -2471,6 +2552,8 @@ status_t StagefrightRecorder::reset() {
     mAudioBitRate  = 12200;
     mInterleaveDurationUs = 0;
     mIFramesIntervalSec = 1;
+    mEnabledCompressAudioRecording = false;
+    mAudioSourceNode.clear();
     mAudioSourceNode = 0;
     mUse64BitFileOffset = false;
     mMovieTimeScale  = -1;
@@ -2500,6 +2583,8 @@ status_t StagefrightRecorder::reset() {
     mNPauses = 0;
 
     mOutputFd = -1;
+
+    mCameraSource = NULL;
 
     return OK;
 }

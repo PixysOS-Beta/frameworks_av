@@ -240,6 +240,7 @@ enum {
     // Key for ALAC Magic Cookie
     kKeyAlacMagicCookie  = 'almc', // raw data
 
+    kKeyFeatureNalLengthBitstream = 'nlbs', // int32_t key to check nal length bistream
     // AC-4 AudioPresentationInfo
     kKeyAudioPresentationInfo = 'audP',  // raw data
 
@@ -267,7 +268,6 @@ enum {
     kKeyRtpExtMap        = 'extm', // int32_t, rtp extension ID for cvo on RTP protocol.
     kKeyRtpCvoDegrees    = 'cvod', // int32_t, rtp cvo degrees as per 3GPP 26.114.
     kKeyRtpDscp          = 'dscp', // int32_t, DSCP(Differentiated services codepoint) of RFC 2474.
-    kKeyRtpEcn           = 'sEcn', // int32_t, ECN (Explicit Congestion Notification) of RFC 3168
     kKeySocketNetwork    = 'sNet', // int64_t, socket will be bound to network handle.
 
     // Slow-motion markers
@@ -278,6 +278,7 @@ enum {
     kKeyLastSampleIndexInChunk = 'lsic',  //int64_t, index of last sample in a chunk.
     kKeySampleTimeBeforeAppend = 'lsba', // int64_t, timestamp of last sample of a track.
 
+    kKeyVendorFeatureNalLength = 'vfnl', // int32_t key to check nal length enable
 };
 
 enum {
