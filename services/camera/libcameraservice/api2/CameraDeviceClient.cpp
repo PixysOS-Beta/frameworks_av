@@ -107,9 +107,9 @@ CameraDeviceClient::CameraDeviceClient(const sp<CameraService>& cameraService,
     mInputStream(),
     mStreamingRequestId(REQUEST_ID_NONE),
     mRequestIdCounter(0),
+    mPrivilegedClient(false),
     mOverrideForPerfClass(overrideForPerfClass),
-    mOriginalCameraId(originalCameraId),
-    mPrivilegedClient(false) {
+    mOriginalCameraId(originalCameraId) {
 
     char value[PROPERTY_VALUE_MAX];
     property_get("persist.vendor.camera.privapp.list", value, "");
